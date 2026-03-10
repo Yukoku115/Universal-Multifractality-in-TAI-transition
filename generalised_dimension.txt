@@ -1,0 +1,332 @@
+"""
+Figure 4 reproduction — fast version
+Anderson disorder, t2=1/3, using small lattices and few realisations.
+"""
+import numpy as np
+from scipy.spatial.distance import cdist
+from scipy.optimize import curve_fit
+from scipy.sparse import csr_matrix
+from scipy.sparse.linalg import eigsh
+import matplotlib.pyplot as plt
+import sys, time
+
+plt.rcParams.update({
+    'font.size': 11, 'font.family': 'serif',
+    'mathtext.fontset': 'stix', 'axes.linewidth': 1.2,
+    'lines.linewidth': 1.5, 'figure.dpi': 150,
+})
+
+# ── Lattice ──────────────────────────────────────────────────────────────────
+def build_honeycomb(Nx, Ny, a=1.0):
+    a1 = np.array([np.sqrt(3)*a, 0])
+    a2 = np.array([np.sqrt(3)/2*a, 3/2*a])
+    xs, ys, subs = [], [], []
+    for i in range(Nx):
+        for j in range(Ny):
+            R = i*a1 + j*a2
+            xs += [R[0], R[0]]; ys += [R[1], R[1]+a]; subs += ['A','B']
+    return np.array(xs), np.array(ys), np.array(subs)
+
+V_POS = np.array([[np.sqrt(3),0],[-np.sqrt(3)/2,1.5],[-np.sqrt(3)/2,-1.5]])
+V_NEG = -V_POS
+
+def build_H(x, y, subs, t1=1.0, t2=1/3, M=0.0, W=0.0, rng=None):
+    """Fully vectorised Haldane Hamiltonian builder — ~250x faster than loop version."""
+    if rng is None: rng = np.random.default_rng()
+    N      = len(x)
+    coords = np.column_stack((x, y))
+    sub_A  = (subs == 'A').astype(float)
+    D      = cdist(coords, coords)
+
+    H = np.zeros((N, N), dtype=complex)
+
+    # ── Nearest-neighbour hopping (t1) ──────────────────────────────────────
+    ri, ci    = np.where(np.triu(np.isclose(D, 1.0, atol=1e-3), k=1))
+    H[ri, ci] = -t1;  H[ci, ri] = -t1
+
+    # ── Next-nearest-neighbour hopping (t2) — vectorised sign detection ─────
+    ri, ci = np.where(np.triu(np.isclose(D, np.sqrt(3), atol=1e-3), k=1))
+    if len(ri):
+        dvecs    = coords[ri] - coords[ci]          # shape (n_pairs, 2)
+        dots_pos = dvecs @ V_POS.T                  # dot with each +vector
+        dots_neg = dvecs @ V_NEG.T                  # dot with each -vector
+        # matching vectors give dot product = |v|^2 = (sqrt(3))^2 = 3.0
+        is_pos   = np.any(np.abs(dots_pos - 3.0) < 1e-2, axis=1)
+        is_neg   = np.any(np.abs(dots_neg - 3.0) < 1e-2, axis=1)
+        sign     = np.where(is_pos, 1.0, np.where(is_neg, -1.0, 0.0))
+        sign    *= np.where(sub_A[ri] < 0.5, -1, 1)   # flip sign on B sublattice
+        valid    = sign != 0
+        hops     = -t2 * np.exp(1j * sign[valid] * np.pi/2)
+        H[ri[valid], ci[valid]] = hops
+        H[ci[valid], ri[valid]] = hops.conj()
+
+    # ── On-site: staggered mass + Anderson disorder ──────────────────────────
+    mass     = np.where(sub_A > 0.5, M, -M)
+    disorder = rng.uniform(-W/2, W/2, N) if W > 0 else np.zeros(N)
+    np.fill_diagonal(H, mass + disorder)
+    return H
+
+# ── Multifractal D_q via TRUE 2D spatial box-counting ────────────────────────
+def compute_Dq(psi, atom_x, atom_y, box_sizes, q_vals):
+    """
+    Proper 2D spatial box-counting following the paper (Eqs. 3-6).
+
+    For each box side length l:
+      - Tile the sample with non-overlapping l x l squares
+      - mu_k = sum of |psi|^2 within box k  (box probability)
+      - P_q(l) = sum_k mu_k^q
+
+    The scaling relation is:  P_q(l) ~ l^tau(q)
+    So tau(q) = slope of log P_q vs log l  (both positive, l increasing)
+
+    Then D_q = tau(q) / (q-1)   for q != 1
+         D_1 = slope of -sum(mu*log mu) vs log l   (Shannon entropy)
+
+    Sanity check:
+      Extended state  -> D_q = 2  (fills 2D space)
+      Localised state -> D_q = 0  (sits on a point)
+      Critical state  -> 0 < D_q < 2, decreasing with q
+    """
+    prob = np.abs(psi)**2
+    prob /= prob.sum()
+
+    x_min, x_max = atom_x.min(), atom_x.max()
+    y_min, y_max = atom_y.min(), atom_y.max()
+
+    log_l  = []
+    log_Pq = {q: [] for q in q_vals}
+
+    for l in box_sizes:
+        x_edges = np.arange(x_min, x_max + l, l)
+        y_edges = np.arange(y_min, y_max + l, l)
+
+        ix = np.searchsorted(x_edges, atom_x, side='right') - 1
+        iy = np.searchsorted(y_edges, atom_y, side='right') - 1
+
+        n_xcells = len(x_edges) - 1
+        box_id   = iy * n_xcells + ix
+
+        unique_boxes = np.unique(box_id)
+        mu = np.array([prob[box_id == b].sum() for b in unique_boxes])
+        mu = mu[mu > 0]
+
+        log_l.append(np.log(l))
+
+        for q in q_vals:
+            if q == 1:
+                # Shannon entropy: S = -sum(mu * log mu), scales as S ~ l^D1
+                Pq = -np.sum(mu * np.log(mu))
+            else:
+                Pq = np.sum(mu**q)
+            log_Pq[q].append(np.log(max(Pq, 1e-300)))
+
+    ll = np.array(log_l)
+    tau, Dq = {}, {}
+    for q in q_vals:
+        lP    = np.array(log_Pq[q])
+        # tau(q) = slope of log P_q vs log l
+        slope = np.polyfit(ll, lP, 1)[0]
+        tau[q] = slope
+        # D_q = tau(q) / (q-1)   [for q=1: slope of entropy vs log l]
+        Dq[q]  = slope / (q - 1) if q != 1 else slope
+    return tau, Dq
+
+def parabolic_tau(q, d, gamma): return d*(q-1)+gamma*q*(1-q)
+
+def fit_gamma(q_vals, tau_vals, d=2):
+    q=np.array(q_vals); t=np.array(tau_vals)
+    popt,_=curve_fit(lambda q,g: parabolic_tau(q,d,g), q, t, p0=[0.3], bounds=(0,3))
+    return popt[0]
+
+# ═══════════════════════════════════════════════════════════════════════════
+# (a) D2 phase diagram
+# Moderate settings: 20x20 lattice (~800 atoms), 20x20 grid, 20 realisations.
+# For overnight: increase Nx_a/Ny_a to 30-40, grid to 30, n_real_a to 50+
+# ═══════════════════════════════════════════════════════════════════════════
+print("=== (a) D2 map ===")
+Nx_a, Ny_a = 35, 35              # <-- increase for overnight run
+x_a, y_a, sub_a = build_honeycomb(Nx_a, Ny_a)
+
+# Box sizes in real-space units (lattice constant a=1).
+# Must span from ~2a up to ~L/3 to give a good scaling range.
+# With Nx=20 the sample is ~35 units wide, so l from 2 to 12 is sensible.
+box_a  = [2, 3, 4, 5, 6, 8, 10, 12]   # real-space box edge lengths
+q_d2   = [2]
+
+grid     = 30                    # <-- increase for overnight run
+W_vals   = np.linspace(0.0, 9.5, grid)
+M_vals   = np.linspace(1.3, 2.8, grid)
+n_real_a = 30                    # <-- increase for overnight run
+
+D2_map = np.zeros((grid, grid))
+rng    = np.random.default_rng(42)
+total  = grid * grid
+cnt    = 0
+t_start = time.time()
+
+for i, M in enumerate(M_vals):
+    for j, W in enumerate(W_vals):
+        cnt += 1
+
+        # ── Time estimate ────────────────────────────────────────────
+        elapsed   = time.time() - t_start
+        avg_per_pt = elapsed / cnt              # seconds per grid point so far
+        remaining = avg_per_pt * (total - cnt)  # estimated seconds left
+        mins, secs = divmod(int(remaining), 60)
+        hrs,  mins = divmod(mins, 60)
+        eta_str = f"{hrs}h {mins:02d}m {secs:02d}s" if hrs else f"{mins}m {secs:02d}s"
+        # ─────────────────────────────────────────────────────────────
+
+        sys.stdout.write(
+            f"\r  D2 map {cnt}/{total}  (M={M:.2f}, W={W:.2f})  "
+            f"ETA: {eta_str}   "
+        )
+        sys.stdout.flush()
+
+        d2s = []
+        for _ in range(n_real_a):
+            H = build_H(x_a, y_a, sub_a, M=M, W=W, rng=rng)
+            # eigsh finds only the 4 states nearest E=0 — much faster than full eigh
+            try:
+                _, evecs = eigsh(csr_matrix(H), k=4, sigma=0.0, which='LM', tol=1e-4)
+            except Exception:
+                evals, evecs_full = np.linalg.eigh(H)
+                evecs = evecs_full[:, np.argsort(np.abs(evals))[:4]]
+            for k in range(evecs.shape[1]):
+                _, Dq_k = compute_Dq(evecs[:, k], x_a, y_a, box_a, q_d2)
+                d2s.append(Dq_k[2])
+
+        D2_map[i, j] = np.mean(d2s)
+
+print("\nD2 map done.")
+
+# ═══════════════════════════════════════════════════════════════════════════
+# (b-e) Spectra
+# Moderate: 20x20 flake, 50 realisations.
+# For overnight: increase Nx_s/Ny_s to 30-40, n_spectra to 200+
+# ═══════════════════════════════════════════════════════════════════════════
+print("=== (b-e) Spectra ===")
+Nx_s, Ny_s = 40, 40              # <-- increase for overnight run
+x_s, y_s, sub_s = build_honeycomb(Nx_s, Ny_s)
+
+# Box sizes must match the new lattice size
+box_s  = [2, 3, 4, 5, 6, 8, 10, 12, 15]   # real-space units
+q_vals = [0.5, 1.5, 2, 2.5, 3, 4, 5, 6, 7, 8, 9, 10]  # q=1 omitted (needs special treatment)
+n_spectra = 200                   # <-- increase for overnight run
+
+phase_points = [
+    # (M,    W,    label,      color,     marker, panel)
+    (1.44, 1.50, "BI",       "#e6550d", "h",  "bc"),
+    (2.00, 5.50, "CI",       "#31a354", "D",  "bc"),
+    (1.44, 5.50, "TAI",      "#e31a1c", "o",  "bc"),
+    (2.60, 4.00, "TAI",      "#984ea3", "^",  "bc"),
+    (2.18, 4.39, "Boundary", "#e7298a", "s",  "de"),
+    (1.90, 6.82, "Boundary", "#7570b3", "p",  "de"),
+    (2.42, 6.09, "Boundary", "#1f78b4", "D",  "de"),
+]
+
+spectra = {}
+for (M, W, label, color, marker, panel) in phase_points:
+    print(f"  ({M:.2f},{W:.2f}) {label} ...", end=' ', flush=True)
+    tau_acc = {q: [] for q in q_vals}
+    rng2 = np.random.default_rng(0)
+    for _ in range(n_spectra):
+        H = build_H(x_s, y_s, sub_s, M=M, W=W, rng=rng2)
+        try:
+            _, evecs = eigsh(csr_matrix(H), k=4, sigma=0.0, which='LM', tol=1e-4)
+        except Exception:
+            evals, evecs_full = np.linalg.eigh(H)
+            evecs = evecs_full[:, np.argsort(np.abs(evals))[:4]]
+        for k in range(evecs.shape[1]):
+            tau_k, _ = compute_Dq(evecs[:, k], x_s, y_s, box_s, q_vals)
+            for q in q_vals:
+                tau_acc[q].append(tau_k[q])
+    tau_m = {q: np.mean(tau_acc[q]) for q in q_vals}
+    Dq_m  = {q: tau_m[q] / (q - 1) for q in q_vals}
+    spectra[(M, W)] = (tau_m, Dq_m)
+    print("done")
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Plot
+# ═══════════════════════════════════════════════════════════════════════════
+fig = plt.figure(figsize=(15, 8))
+gs = fig.add_gridspec(2, 3, width_ratios=[1.9, 1, 1],
+                      hspace=0.45, wspace=0.32,
+                      left=0.06, right=0.97, top=0.91, bottom=0.10)
+ax_a = fig.add_subplot(gs[:,0])
+ax_b = fig.add_subplot(gs[0,1]); ax_c = fig.add_subplot(gs[1,1])
+ax_d = fig.add_subplot(gs[0,2]); ax_e = fig.add_subplot(gs[1,2])
+
+# (a) — colormap matching the paper: deep blue(0) -> cyan -> white -> yellow -> dark red(2)
+from matplotlib.colors import LinearSegmentedColormap
+paper_cmap = LinearSegmentedColormap.from_list('paper_d2', [
+    (0.00, '#08306b'),   # deep blue      D2 ~ 0
+    (0.20, '#2171b5'),   # mid blue
+    (0.40, '#6baed6'),   # light blue
+    (0.50, '#deebf7'),   # very pale blue D2 ~ 1
+    (0.60, '#ffffb2'),   # pale yellow
+    (0.75, '#fecc5c'),   # yellow
+    (0.88, '#f03b20'),   # orange-red
+    (1.00, '#bd0026'),   # dark red       D2 ~ 2
+])
+D2_plot = np.clip(D2_map, 0, 2)
+im = ax_a.pcolormesh(W_vals, M_vals, D2_plot, cmap=paper_cmap,
+                     shading='auto', vmin=0, vmax=2)
+cbar = fig.colorbar(im, ax=ax_a, pad=0.02)
+cbar.set_label(r'$D_2$', fontsize=12)
+
+for M, W, label, color, marker, panel in phase_points:
+    if 1.3<=M<=2.8 and 0<=W<=9.5:
+        ax_a.plot(W, M, marker=marker, color=color, ms=8,
+                  mec='white', mew=0.8, zorder=5)
+
+ax_a.text(1.5, 2.55, 'BI',  fontsize=12, fontweight='bold', color='white')
+ax_a.text(7.5, 2.10, 'AI',  fontsize=12, fontweight='bold', color='white')
+ax_a.text(1.5, 1.42, 'CI',  fontsize=12, fontweight='bold', color='white')
+ax_a.text(4.5, 1.80, 'TAI', fontsize=12, fontweight='bold', color='white')
+ax_a.set_xlabel(r'$W$', fontsize=13); ax_a.set_ylabel(r'$M$', fontsize=13)
+ax_a.set_title(r'(a)  $D_2$', fontsize=12, loc='left')
+ax_a.set_aspect('auto')   # let the large width_ratio make it naturally squarish
+
+# (b,c,d,e)
+q_arr = np.array(q_vals)
+q_fit = np.linspace(0.1, 10, 200)
+
+for ax_tau, ax_Dq, panels in [(ax_b, ax_c, 'bc'), (ax_d, ax_e, 'de')]:
+    for M, W, label, color, marker, panel in phase_points:
+        if panel != panels: continue
+        tau_d, Dq_d = spectra[(M,W)]
+        tau_arr = np.array([tau_d[q] for q in q_vals])
+        Dq_arr  = np.array([Dq_d[q]  for q in q_vals])
+        lbl = f"({M},{W})"
+        ax_tau.plot(q_arr, tau_arr, marker=marker, color=color, ms=5, label=lbl)
+        ax_Dq.plot(q_arr, Dq_arr,  marker=marker, color=color, ms=5, label=lbl)
+        try:
+            qf = [q for q in q_vals if q>=0.5]
+            tf = [tau_d[q] for q in qf]
+            gamma = fit_gamma(qf, tf)
+            ax_tau.plot(q_fit, parabolic_tau(q_fit,2,gamma), '--',
+                        color=color, lw=1.0, alpha=0.6)
+        except Exception:
+            pass
+
+    ax_tau.axhline(0, color='k', lw=0.5, ls=':')
+    ax_tau.set_ylabel(r'$\tau(q)$', fontsize=12)
+    ax_tau.legend(fontsize=7.5, framealpha=0.7)
+    ax_tau.set_xlim(0,10); ax_tau.set_xticks([0,2,4,6,8,10])
+
+    ax_Dq.axhline(0, color='k', lw=0.5, ls=':')
+    ax_Dq.axhline(2, color='k', lw=0.5, ls=':')
+    ax_Dq.set_xlabel(r'$q$', fontsize=12); ax_Dq.set_ylabel(r'$D_q$', fontsize=12)
+    ax_Dq.set_ylim(0, 2.5); ax_Dq.set_xlim(0,10)
+    ax_Dq.set_xticks([0,2,4,6,8,10])
+
+ax_b.set_title(r'(b)', fontsize=12, loc='left')
+ax_c.set_title(r'(c)', fontsize=12, loc='left')
+ax_d.set_title(r'(d)', fontsize=12, loc='left')
+ax_e.set_title(r'(e)', fontsize=12, loc='left')
+
+fig.suptitle(r"Fig. 4 — Multifractal analysis (Anderson disorder, $t_2=\frac{1}{3}$)",
+             fontsize=13)
+
+plt.show()
