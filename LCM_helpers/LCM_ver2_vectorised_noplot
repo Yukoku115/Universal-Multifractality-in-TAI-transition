@@ -1,0 +1,270 @@
+import os
+import sys
+import numpy as np
+from scipy.spatial.distance import cdist
+import matplotlib.pyplot as plt
+import matplotlib as mpl
+from matplotlib.colors import LinearSegmentedColormap
+
+# ==============================================================================
+# Colormap & Plot Styling
+# ==============================================================================
+tai_cmap = LinearSegmentedColormap.from_list(
+    "tai_cmap",
+    [
+        (0.00, "#3831f6"),
+        (0.25, "#00e5ff"),
+        (0.50, "#ffffff"),
+        (0.75, "#9211ee"),
+        (1.00, "#fe0ea6"),
+    ]
+)
+mpl.colormaps.register(tai_cmap, name="tai_cmap", force=True)
+
+plt.rcParams.update({
+    'font.size': 12,
+    'font.family': 'serif',
+    'mathtext.fontset': 'stix',
+    'axes.linewidth': 1.2,
+    'lines.linewidth': 1.5,
+    'figure.dpi': 150
+})
+
+# ==============================================================================
+# Lattice & Hamiltonian
+# ==============================================================================
+_NNN_VECS_POS = np.array([
+    [ np.sqrt(3),   0.0],
+    [-np.sqrt(3)/2, 1.5],
+    [-np.sqrt(3)/2,-1.5],
+])
+_NNN_VECS_NEG = -_NNN_VECS_POS
+
+
+def build_honeycomb(Nx, Ny, a=1.0):
+    a1 = np.array([np.sqrt(3) * a, 0])
+    a2 = np.array([np.sqrt(3) / 2 * a, 3 / 2 * a])
+
+    i_idx, j_idx = np.meshgrid(np.arange(Nx), np.arange(Ny), indexing='ij')
+    R = (i_idx[..., np.newaxis] * a1 + j_idx[..., np.newaxis] * a2).reshape(-1, 2)
+
+    x_coords = np.empty(2 * len(R))
+    y_coords = np.empty(2 * len(R))
+    x_coords[0::2] = R[:, 0];        y_coords[0::2] = R[:, 1]
+    x_coords[1::2] = R[:, 0];        y_coords[1::2] = R[:, 1] + a
+
+    sublattices = np.empty(2 * len(R), dtype='U1')
+    sublattices[0::2] = 'A'
+    sublattices[1::2] = 'B'
+
+    return x_coords, y_coords, sublattices
+
+
+def build_H_real_space(x, y, sublattices, t1=1.0, t2=1/3, M=0.0, W=0.0,
+                       disorder_type="Anderson"):
+    N = len(x)
+    coords = np.column_stack((x, y))
+    dist_matrix = cdist(coords, coords)
+
+    phase_matrix = np.zeros((N, N), dtype=float)
+    if disorder_type == "Magnetic" and W > 0:
+        raw = np.random.uniform(-W / 2, W / 2, (N, N))
+        phase_matrix = (raw - raw.T) / 2
+
+    H = np.zeros((N, N), dtype=complex)
+
+    nn_mask = np.isclose(dist_matrix, 1.0, atol=1e-3)
+    H[nn_mask] = -t1 * np.exp(1j * phase_matrix[nn_mask])
+
+    nnn_mask  = np.isclose(dist_matrix, np.sqrt(3), atol=1e-3)
+    diff_vecs = coords[:, np.newaxis, :] - coords[np.newaxis, :, :]
+
+    sign_matrix = np.zeros((N, N), dtype=float)
+    for v in _NNN_VECS_POS:
+        sign_matrix[np.all(np.isclose(diff_vecs, v, atol=1e-3), axis=2)] =  1.0
+    for v in _NNN_VECS_NEG:
+        sign_matrix[np.all(np.isclose(diff_vecs, v, atol=1e-3), axis=2)] = -1.0
+    sign_matrix[sublattices == 'B', :] *= -1
+
+    active_nnn = nnn_mask & (sign_matrix != 0)
+    H[active_nnn] = (-t2
+                     * np.exp(1j * sign_matrix[active_nnn] * np.pi / 2)
+                     * np.exp(1j * phase_matrix[active_nnn]))
+
+    diag = np.where(sublattices == 'A', M, -M)
+    if disorder_type == "Anderson" and W > 0:
+        diag = diag + np.random.uniform(-W / 2, W / 2, N)
+    H[np.arange(N), np.arange(N)] += diag
+
+    return H
+
+
+def calc_local_chern(H, x, y, E_Fermi=0.0):
+    evals, evecs = np.linalg.eigh(H)
+    P   = evecs[:, evals < E_Fermi] @ evecs[:, evals < E_Fermi].conj().T
+    PxP = P @ np.diag(x) @ P
+    PyP = P @ np.diag(y) @ P
+    return np.real(np.diag(-2j * np.pi * (PxP @ PyP - PyP @ PxP)))
+
+
+# ==============================================================================
+# Parameters  —  edit here
+# ==============================================================================
+Nx_val, Ny_val = 35, 35
+grid_size      = 50
+t1_val         = 1.0
+t2_val         = 1 / 3
+bulk_frac      = 0.40
+disorder_type  = "Anderson"
+W_vals         = np.linspace(0.0, 9.5, grid_size)
+M_vals         = np.linspace(1.3, 2.8, grid_size)
+CHECKPOINT     = "phase_diagram_checkpoint.npz"
+
+# ==============================================================================
+# Build lattice & bulk mask
+# ==============================================================================
+x_lat, y_lat, sub_lat = build_honeycomb(Nx=Nx_val, Ny=Ny_val)
+N_sites = len(x_lat)
+
+dist_from_center = np.sqrt((x_lat - x_lat.mean())**2 + (y_lat - y_lat.mean())**2)
+bulk_mask = dist_from_center < np.max(dist_from_center) * bulk_frac
+N_bulk    = int(bulk_mask.sum())
+
+# ==============================================================================
+# Checkpoint: check ALL parameters before deciding to resume
+# ==============================================================================
+phase_map = np.full((len(M_vals), len(W_vals)), np.nan, dtype=float)
+done_mask = np.zeros((len(M_vals), len(W_vals)), dtype=bool)
+
+if os.path.exists(CHECKPOINT):
+    ck = np.load(CHECKPOINT, allow_pickle=True)
+
+    mismatches = []
+
+    if not (np.allclose(W_vals, ck["W_vals"]) and W_vals.shape == ck["W_vals"].shape):
+        mismatches.append(f"  W_vals        : saved={ck['W_vals'][[0,-1]]}  current={W_vals[[0,-1]]}")
+    if not (np.allclose(M_vals, ck["M_vals"]) and M_vals.shape == ck["M_vals"].shape):
+        mismatches.append(f"  M_vals        : saved={ck['M_vals'][[0,-1]]}  current={M_vals[[0,-1]]}")
+    # Treat absent keys (old checkpoint format) as a mismatch
+    if "Nx" not in ck or int(ck["Nx"]) != Nx_val:
+        saved = int(ck["Nx"]) if "Nx" in ck else "not saved"
+        mismatches.append(f"  Nx            : saved={saved}  current={Nx_val}")
+    if "Ny" not in ck or int(ck["Ny"]) != Ny_val:
+        saved = int(ck["Ny"]) if "Ny" in ck else "not saved"
+        mismatches.append(f"  Ny            : saved={saved}  current={Ny_val}")
+    if "t1" not in ck or not np.isclose(float(ck["t1"]), t1_val):
+        saved = float(ck["t1"]) if "t1" in ck else "not saved"
+        mismatches.append(f"  t1            : saved={saved}  current={t1_val}")
+    if "t2" not in ck or not np.isclose(float(ck["t2"]), t2_val):
+        saved = f"{float(ck['t2']):.6f}" if "t2" in ck else "not saved"
+        mismatches.append(f"  t2            : saved={saved}  current={t2_val:.6f}")
+    if "bulk_frac" not in ck or not np.isclose(float(ck["bulk_frac"]), bulk_frac):
+        saved = float(ck["bulk_frac"]) if "bulk_frac" in ck else "not saved"
+        mismatches.append(f"  bulk_frac     : saved={saved}  current={bulk_frac}")
+    if "disorder_type" not in ck or ck["disorder_type"].item().decode() != disorder_type:
+        saved = ck["disorder_type"].item().decode() if "disorder_type" in ck else "not saved"
+        mismatches.append(f"  disorder_type : saved={saved}  current={disorder_type}")
+
+    if mismatches:
+        print("Parameter mismatch — starting fresh. Changed parameters:")
+        for m in mismatches:
+            print(m)
+        print()
+        # Immediately overwrite the checkpoint on disk so stale data
+        # cannot survive an early interrupt before the first new point saves.
+        np.savez(
+            CHECKPOINT,
+            W_vals=W_vals, M_vals=M_vals,
+            phase_map=phase_map, done_mask=done_mask,
+            Nx=Nx_val, Ny=Ny_val,
+            N_sites=N_sites, N_bulk=N_bulk,
+            t1=t1_val, t2=t2_val,
+            bulk_frac=bulk_frac,
+            disorder_type=np.bytes_(disorder_type),
+        )
+    else:
+        phase_map = ck["phase_map"]
+        done_mask = ck["done_mask"]
+        print(f"All parameters match — resuming ({int(done_mask.sum())}/{grid_size**2} points done).\n")
+
+# ==============================================================================
+# Main computation loop
+# ==============================================================================
+total       = grid_size * grid_size
+done_so_far = int(done_mask.sum())
+print(f"System  : {Nx_val}x{Ny_val} unit cells  |  N_sites={N_sites}  |  N_bulk={N_bulk}")
+print(f"Grid    : {grid_size}x{grid_size}  |  W in [{W_vals.min():.2f}, {W_vals.max():.2f}]  |  M in [{M_vals.min():.2f}, {M_vals.max():.2f}]")
+print(f"Hoppings: t1={t1_val}, t2={t2_val:.4f}  |  Disorder: {disorder_type}")
+print(f"Computing {total - done_so_far} remaining points...\n")
+
+for i, M_val in enumerate(M_vals):
+    for j, W_val in enumerate(W_vals):
+        if done_mask[i, j]:
+            continue
+
+        H       = build_H_real_space(x_lat, y_lat, sub_lat,
+                                     t1=t1_val, t2=t2_val,
+                                     M=M_val, W=W_val,
+                                     disorder_type=disorder_type)
+        C_local = calc_local_chern(H, x_lat, y_lat)
+        phase_map[i, j] = np.mean(C_local[bulk_mask])
+        done_mask[i, j] = True
+        done_so_far     += 1
+
+        pct = done_so_far / total
+        bar = '=' * int(30 * pct) + '-' * (30 - int(30 * pct))
+        sys.stdout.write(
+            f"\r[{bar}] {done_so_far}/{total} ({pct*100:.1f}%)  "
+            f"M={M_val:.3f}  W={W_val:.3f}"
+        )
+        sys.stdout.flush()
+
+        np.savez(
+            CHECKPOINT,
+            W_vals=W_vals, M_vals=M_vals,
+            phase_map=phase_map, done_mask=done_mask,
+            Nx=Nx_val, Ny=Ny_val,
+            N_sites=N_sites, N_bulk=N_bulk,
+            t1=t1_val, t2=t2_val,
+            bulk_frac=bulk_frac,
+            disorder_type=np.bytes_(disorder_type),
+        )
+
+print("\nDone. Generating plot...")
+
+# ==============================================================================
+# Plot
+# ==============================================================================
+fig, ax = plt.subplots(figsize=(5.5, 6.0))
+fig.subplots_adjust(bottom=0.22, top=0.93)
+
+mesh = ax.imshow(
+    phase_map,
+    origin="lower",
+    extent=[W_vals.min(), W_vals.max(), M_vals.min(), M_vals.max()],
+    cmap="tai_cmap",
+    vmin=-0.2, vmax=1.2,
+    aspect="auto"
+)
+ax.set_box_aspect(1)
+ax.set_title("Topological Phase Diagram", pad=10)
+ax.set_xlabel("Disorder Strength ($W$)")
+ax.set_ylabel("Staggered Mass ($M$)")
+fig.colorbar(mesh, ax=ax, label='Bulk Local Chern Marker $\\langle C \\rangle$')
+
+caption = (
+    f"System: ${Nx_val} \\times {Ny_val}$ unit cells  "
+    f"($N_{{\\mathrm{{sites}}}} = {N_sites}$,  $N_{{\\mathrm{{bulk}}}} = {N_bulk}$,  "
+    f"bulk radius = {bulk_frac:.0%})\n"
+    f"$t_1={t1_val}$,  $t_2={t2_val:.4f}$  |  Disorder: {disorder_type}  |  "
+    f"Grid: ${grid_size} \\times {grid_size}$  "
+    f"($W \\in [{W_vals.min():.1f},\\,{W_vals.max():.1f}]$,  "
+    f"$M \\in [{M_vals.min():.1f},\\,{M_vals.max():.1f}]$)"
+)
+fig.text(0.5, 0.02, caption, ha='center', va='bottom',
+         fontsize=7.5, fontstyle='italic', color='#333333',
+         transform=fig.transFigure)
+
+plt.savefig("phase_diagram.png", dpi=200, bbox_inches='tight')
+plt.show()
+print("Saved to phase_diagram.png") 

@@ -144,19 +144,21 @@ def fit_gamma(q_vals, tau_vals, d=2):
 # For overnight: increase Nx_a/Ny_a to 30-40, grid to 30, n_real_a to 50+
 # ═══════════════════════════════════════════════════════════════════════════
 print("=== (a) D2 map ===")
-Nx_a, Ny_a = 35, 35              # <-- increase for overnight run
+Nx_a, Ny_a = 20, 20              # <-- increase for overnight run
 x_a, y_a, sub_a = build_honeycomb(Nx_a, Ny_a)
 
 # Box sizes in real-space units (lattice constant a=1).
 # Must span from ~2a up to ~L/3 to give a good scaling range.
 # With Nx=20 the sample is ~35 units wide, so l from 2 to 12 is sensible.
-box_a  = [2, 3, 4, 5, 6, 8, 10, 12]   # real-space box edge lengths
+box_a  = [2, 3, 4, 5, 6, 8, 10, 12, 15, 20, 25, 30]  # extended to ~L/3
 q_d2   = [2]
+E_THRESH = 0.5   # only count states with |E|<E_THRESH as "in-gap"
+                 # excludes band-edge extended Bloch states in gapped BI/CI
 
-grid     = 30                    # <-- increase for overnight run
+grid     = 20                    # <-- increase for overnight run
 W_vals   = np.linspace(0.0, 9.5, grid)
 M_vals   = np.linspace(1.3, 2.8, grid)
-n_real_a = 30                    # <-- increase for overnight run
+n_real_a = 20                    # <-- increase for overnight run
 
 D2_map = np.zeros((grid, grid))
 rng    = np.random.default_rng(42)
@@ -186,17 +188,21 @@ for i, M in enumerate(M_vals):
         d2s = []
         for _ in range(n_real_a):
             H = build_H(x_a, y_a, sub_a, M=M, W=W, rng=rng)
-            # eigsh finds only the 4 states nearest E=0 — much faster than full eigh
+            # k=8 gives more candidates; we then filter to in-gap states only
             try:
-                _, evecs = eigsh(csr_matrix(H), k=4, sigma=0.0, which='LM', tol=1e-4)
+                evals, evecs = eigsh(csr_matrix(H), k=8, sigma=0.0, which='LM', tol=1e-4)
             except Exception:
-                evals, evecs_full = np.linalg.eigh(H)
-                evecs = evecs_full[:, np.argsort(np.abs(evals))[:4]]
+                evals_full, evecs_full = np.linalg.eigh(H)
+                idx = np.argsort(np.abs(evals_full))[:8]
+                evals, evecs = evals_full[idx], evecs_full[:, idx]
+            # Only use states genuinely in the gap — discard band-edge Bloch states
             for k in range(evecs.shape[1]):
-                _, Dq_k = compute_Dq(evecs[:, k], x_a, y_a, box_a, q_d2)
-                d2s.append(Dq_k[2])
+                if np.abs(evals[k]) < E_THRESH:
+                    _, Dq_k = compute_Dq(evecs[:, k], x_a, y_a, box_a, q_d2)
+                    d2s.append(Dq_k[2])
 
-        D2_map[i, j] = np.mean(d2s)
+        # If no in-gap states found (deep BI, W≈0), D2=0 (system is gapped → localized-like)
+        D2_map[i, j] = np.mean(d2s) if d2s else 0.0
 
 print("\nD2 map done.")
 
@@ -206,20 +212,21 @@ print("\nD2 map done.")
 # For overnight: increase Nx_s/Ny_s to 30-40, n_spectra to 200+
 # ═══════════════════════════════════════════════════════════════════════════
 print("=== (b-e) Spectra ===")
-Nx_s, Ny_s = 40, 40              # <-- increase for overnight run
+Nx_s, Ny_s = 20, 20              # <-- increase for overnight run
 x_s, y_s, sub_s = build_honeycomb(Nx_s, Ny_s)
 
 # Box sizes must match the new lattice size
-box_s  = [2, 3, 4, 5, 6, 8, 10, 12, 15]   # real-space units
-q_vals = [0.5, 1.5, 2, 2.5, 3, 4, 5, 6, 7, 8, 9, 10]  # q=1 omitted (needs special treatment)
-n_spectra = 200                   # <-- increase for overnight run
+box_s  = [2, 3, 4, 5, 6, 8, 10, 12, 15, 20, 25, 30]  # extended to L/3
+q_vals = [0.5, 1.5, 2, 2.5, 3, 4, 5, 6, 7, 8, 9, 10]  # q=1 omitted
+n_spectra = 50                   # <-- increase for overnight run
 
 phase_points = [
     # (M,    W,    label,      color,     marker, panel)
-    (1.44, 1.50, "BI",       "#e6550d", "h",  "bc"),
-    (2.00, 5.50, "CI",       "#31a354", "D",  "bc"),
-    (1.44, 5.50, "TAI",      "#e31a1c", "o",  "bc"),
-    (2.60, 4.00, "TAI",      "#984ea3", "^",  "bc"),
+    # M_c = sqrt(3) ≈ 1.732: CI for M<M_c, BI for M>M_c
+    (1.44, 1.50, "CI",       "#e6550d", "h",  "bc"),   # M<M_c → topological (CI)
+    (2.00, 5.50, "AI",       "#31a354", "D",  "bc"),   # M>M_c, large W → Anderson ins.
+    (1.44, 5.50, "TAI",      "#e31a1c", "o",  "bc"),   # disorder-induced topological
+    (2.60, 4.00, "BI",       "#984ea3", "^",  "bc"),   # M>>M_c, moderate W → trivial
     (2.18, 4.39, "Boundary", "#e7298a", "s",  "de"),
     (1.90, 6.82, "Boundary", "#7570b3", "p",  "de"),
     (2.42, 6.09, "Boundary", "#1f78b4", "D",  "de"),
@@ -233,14 +240,16 @@ for (M, W, label, color, marker, panel) in phase_points:
     for _ in range(n_spectra):
         H = build_H(x_s, y_s, sub_s, M=M, W=W, rng=rng2)
         try:
-            _, evecs = eigsh(csr_matrix(H), k=4, sigma=0.0, which='LM', tol=1e-4)
+            evals, evecs = eigsh(csr_matrix(H), k=8, sigma=0.0, which='LM', tol=1e-4)
         except Exception:
-            evals, evecs_full = np.linalg.eigh(H)
-            evecs = evecs_full[:, np.argsort(np.abs(evals))[:4]]
+            evals_full, evecs_full = np.linalg.eigh(H)
+            idx = np.argsort(np.abs(evals_full))[:8]
+            evals, evecs = evals_full[idx], evecs_full[:, idx]
         for k in range(evecs.shape[1]):
-            tau_k, _ = compute_Dq(evecs[:, k], x_s, y_s, box_s, q_vals)
-            for q in q_vals:
-                tau_acc[q].append(tau_k[q])
+            if np.abs(evals[k]) < E_THRESH:   # in-gap states only
+                tau_k, _ = compute_Dq(evecs[:, k], x_s, y_s, box_s, q_vals)
+                for q in q_vals:
+                    tau_acc[q].append(tau_k[q])
     tau_m = {q: np.mean(tau_acc[q]) for q in q_vals}
     Dq_m  = {q: tau_m[q] / (q - 1) for q in q_vals}
     spectra[(M, W)] = (tau_m, Dq_m)
