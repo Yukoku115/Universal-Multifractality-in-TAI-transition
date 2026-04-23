@@ -35,7 +35,7 @@ N_sites = int(data["N_sites"]) if "N_sites" in data else "?"
 N_bulk  = int(data["N_bulk"])  if "N_bulk"  in data else "?"
 
 # ── Plot ──────────────────────────────────────────────────────────────────────
-fig, ax = plt.subplots(figsize=(5.5, 5.5))
+fig, ax = plt.subplots(figsize=(6.0, 6.0))
 fig.subplots_adjust(bottom=0.12, top=0.93)
 
 
