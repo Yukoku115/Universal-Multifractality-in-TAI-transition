@@ -37,12 +37,16 @@ def main():
     M_vals         = np.linspace(1.3, 2.8, grid_size)   # staggered mass range
     
     # Physics settings
-    tR_base        = 0.4             # baseline (uniform) Rashba coupling
-    sweep_type     = "anderson"         # "anderson" or "rashba" (what does W_vals control?)
-    
+    tR_base        = 0.1             # baseline (uniform) Rashba coupling
+    sweep_type     = "anderson"     # "anderson" or "rashba" (what does W_vals control?)
+    # New feature: enable both disorder types by keeping a small Rashba perturbation
+    # during the Anderson sweep. Set this to True to activate the combined-disorder mode.
+    include_rashba_perturbation = False
+    W_rashba_perturbation    = 0.1
+
     # These are fixed background values applied to whatever ISN'T being swept:
-    W_anderson_fixed = 0.0  
-    W_rashba_fixed   = 0.0  
+    W_anderson_fixed = 0.0
+    W_rashba_fixed   = 0.0
 
     CHECKPOINT     = "km_phase_diagram_checkpoint.npz"
     N_JOBS         = 4               # parallel CPU cores (-1 = all)
@@ -60,9 +64,14 @@ def main():
         x_lat, y_lat, sub_lat
     )
     print("done.")
+
+    if sweep_type == "anderson" and include_rashba_perturbation:
+        W_rashba_fixed = W_rashba_perturbation
+
     print(f"System : {Nx_val}x{Ny_val} unit cells  |  "
           f"N_sites={len(x_lat)}  |  2N={2*len(x_lat)}  |  N_bulk={int(bulk_mask.sum())}")
-    print(f"Physics: tR_base={tR_base}  |  Sweeping: {sweep_type.upper()}")
+    print(f"Physics: tR_base={tR_base}  |  Sweeping: {sweep_type.upper()}  |  "
+          f"W_rashba_fixed={W_rashba_fixed}")
     print(f"Grid   : {grid_size}x{grid_size}  |  "
           f"W in [{W_vals.min():.1f}, {W_vals.max():.1f}]  |  "
           f"M in [{M_vals.min():.1f}, {M_vals.max():.1f}]\n")
@@ -187,13 +196,19 @@ def main():
     # Plotting
     # ==========================================================================
     xlabel = "Rashba Spin Disorder ($W_{Rashba}$)" if sweep_type == "rashba" else "Anderson Disorder ($W_{Anderson}$)"
-    
+    mode_suffix = f"_with_Rashba_{W_rashba_fixed:.2f}" if W_rashba_fixed > 0 else ""
+    phase_title = (
+        f'Kane-Mele Phase Diagram  ({"Anderson sweep with Rashba perturbation" if W_rashba_fixed > 0 else sweep_type.capitalize() + " sweep"} '
+        f'$W_{{rashba}}={W_rashba_fixed}$, $t_R={tR_base}$)'
+        if W_rashba_fixed > 0 else f'Kane-Mele Phase Diagram ($t_R={tR_base}$)'
+    )
+
     plot_phase_diagram(
         W_vals, M_vals, phase_map,
         Nx_val=Nx_val, Ny_val=Ny_val, grid_size=grid_size,
-        save_path=f"km_phase_diagram_{sweep_type}.png",
+        save_path=f"km_phase_diagram_{sweep_type}{mode_suffix}.png",
         cbar_label=r'Spin Chern Marker $C_s$',
-        title=f'Kane-Mele Phase Diagram  ($t_R={tR_base}$)',
+        title=phase_title,
         tR_base=tR_base, sweep_type=sweep_type,
         xlim=(0.0, 9.5)
     )
