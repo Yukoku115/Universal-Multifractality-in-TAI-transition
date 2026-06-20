@@ -31,24 +31,27 @@ def main():
     # ==========================================================================
     # Parameters  —  edit here
     # ==========================================================================
-    Nx_val, Ny_val = 20, 20             # lattice size (keep smaller: 2N x 2N matrices)
-    grid_size      = 50               # resolution of the (M, W) phase diagram grid
+    Nx_val, Ny_val = 15, 15             # lattice size (keep smaller: 2N x 2N matrices)
+    grid_size      = 20               # resolution of the (M, W) phase diagram grid
     W_vals         = np.linspace(0.0, 9.5, grid_size)   # disorder sweep range
     M_vals         = np.linspace(1.3, 2.8, grid_size)   # staggered mass range
     
     # Physics settings
-    tR_base        = 0.1             # baseline (uniform) Rashba coupling
+    tR_base        = 0.4             # baseline (uniform) Rashba coupling
     sweep_type     = "anderson"     # "anderson" or "rashba" (what does W_vals control?)
     # New feature: enable both disorder types by keeping a small Rashba perturbation
     # during the Anderson sweep. Set this to True to activate the combined-disorder mode.
     include_rashba_perturbation = False
     W_rashba_perturbation    = 0.1
+    
+    # Scale Rashba disorder dynamically with Anderson disorder: W_rashba = (W_anderson * rashba_ratio) / sqrt(3)
+    rashba_ratio   = 0.1
 
     # These are fixed background values applied to whatever ISN'T being swept:
     W_anderson_fixed = 0.0
     W_rashba_fixed   = 0.0
 
-    CHECKPOINT     = "km_phase_diagram_checkpoint.npz"
+    CHECKPOINT     = f"km_phase_diagram_checkpoint_N_{Nx_val}_tR_{tR_base:.2f}_ratio_{rashba_ratio:.2f}.npz"
     N_JOBS         = 4               # parallel CPU cores (-1 = all)
 
     # ==========================================================================
@@ -71,7 +74,7 @@ def main():
     print(f"System : {Nx_val}x{Ny_val} unit cells  |  "
           f"N_sites={len(x_lat)}  |  2N={2*len(x_lat)}  |  N_bulk={int(bulk_mask.sum())}")
     print(f"Physics: tR_base={tR_base}  |  Sweeping: {sweep_type.upper()}  |  "
-          f"W_rashba_fixed={W_rashba_fixed}")
+          f"W_rashba_fixed={W_rashba_fixed}  |  rashba_ratio={rashba_ratio}")
     print(f"Grid   : {grid_size}x{grid_size}  |  "
           f"W in [{W_vals.min():.1f}, {W_vals.max():.1f}]  |  "
           f"M in [{M_vals.min():.1f}, {M_vals.max():.1f}]\n")
@@ -89,12 +92,14 @@ def main():
             old_tR        = float(data["tR_base"].item())
             old_W_and_fix = float(data["W_anderson_fixed"].item())
             old_W_ras_fix = float(data["W_rashba_fixed"].item())
+            old_rashba_ratio = float(data["rashba_ratio"].item()) if "rashba_ratio" in data else 0.0
         except KeyError:
             # If any keys are missing in an older checkpoint, force a restart
             old_sweep     = "none"
             old_tR        = -1.0
             old_W_and_fix = -1.0
             old_W_ras_fix = -1.0
+            old_rashba_ratio = -1.0
 
         grid_matches = (
             data["W_vals"].shape == W_vals.shape and
@@ -104,7 +109,8 @@ def main():
             old_sweep == sweep_type and
             np.isclose(old_tR, tR_base) and
             np.isclose(old_W_and_fix, W_anderson_fixed) and
-            np.isclose(old_W_ras_fix, W_rashba_fixed)
+            np.isclose(old_W_ras_fix, W_rashba_fixed) and
+            np.isclose(old_rashba_ratio, rashba_ratio)
         )
         if not grid_matches:
             print("Grid or physics parameters changed — starting fresh.")
@@ -149,7 +155,8 @@ def main():
                 bulk_mask, tR_base=tR_base,
                 W_anderson_fixed=W_anderson_fixed, 
                 W_rashba_fixed=W_rashba_fixed,
-                sweep_type=sweep_type
+                sweep_type=sweep_type,
+                rashba_ratio=rashba_ratio
             )
             for i in batch
         )
@@ -165,7 +172,8 @@ def main():
         np.savez(CHECKPOINT, W_vals=W_vals, M_vals=M_vals,
                  phase_map=phase_map, done_mask=done_mask,
                  sweep_type=sweep_type, tR_base=tR_base,
-                 W_anderson_fixed=W_anderson_fixed, W_rashba_fixed=W_rashba_fixed)
+                 W_anderson_fixed=W_anderson_fixed, W_rashba_fixed=W_rashba_fixed,
+                 rashba_ratio=rashba_ratio)
 
         # ETA tracking
         timing_window.append((batch_points, time.time() - t_batch_start))
@@ -196,24 +204,29 @@ def main():
     # Plotting
     # ==========================================================================
     xlabel = "Rashba Spin Disorder ($W_{Rashba}$)" if sweep_type == "rashba" else "Anderson Disorder ($W_{Anderson}$)"
-    mode_suffix = f"_with_Rashba_{W_rashba_fixed:.2f}" if W_rashba_fixed > 0 else ""
-    phase_title = (
-        f'Kane-Mele Phase Diagram  ({"Anderson sweep with Rashba perturbation" if W_rashba_fixed > 0 else sweep_type.capitalize() + " sweep"} '
-        f'$W_{{rashba}}={W_rashba_fixed}$, $t_R={tR_base}$)'
-        if W_rashba_fixed > 0 else f'Kane-Mele Phase Diagram ($t_R={tR_base}$)'
-    )
+    
+    if rashba_ratio > 0.0:
+        mode_suffix = f"_N_{Nx_val}_tR_{tR_base:.2f}_with_Rashba_ratio_{rashba_ratio:.2f}"
+        phase_title = f'Kane-Mele Phase Diagram ($t_R={tR_base}$, $W_{{rashba}} = {rashba_ratio} W_{{anderson}} / \\sqrt{{3}}$)'
+    else:
+        mode_suffix = f"_N_{Nx_val}_tR_{tR_base:.2f}_with_Rashba_{W_rashba_fixed:.2f}" if W_rashba_fixed > 0 else f"_N_{Nx_val}_tR_{tR_base:.2f}"
+        phase_title = (
+            f'Kane-Mele Phase Diagram  ({"Anderson sweep with Rashba perturbation" if W_rashba_fixed > 0 else sweep_type.capitalize() + " sweep"} '
+            f'$W_{{rashba}}={W_rashba_fixed}$, $t_R={tR_base}$)'
+            if W_rashba_fixed > 0 else f'Kane-Mele Phase Diagram ($t_R={tR_base}$)'
+        )
 
     plot_phase_diagram(
         W_vals, M_vals, phase_map,
         Nx_val=Nx_val, Ny_val=Ny_val, grid_size=grid_size,
         save_path=f"km_phase_diagram_{sweep_type}{mode_suffix}.png",
+        show_plot=True,
         cbar_label=r'Spin Chern Marker $C_s$',
         title=phase_title,
         tR_base=tR_base, sweep_type=sweep_type,
         xlim=(0.0, 9.5)
     )
-    # Patch the plotting xlabel manually for now since we didn't add it to parameters
-    # The image will have W, but we'll know what it means.
+
 
 if __name__ == "__main__":
     main()

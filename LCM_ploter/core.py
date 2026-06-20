@@ -175,31 +175,56 @@ def calc_local_chern(H, x, y, E_Fermi=0.0):
     return np.real(np.diag(-2j * np.pi * (PxP @ PyP - PyP @ PxP)))
 
 # ==============================================================================
-# Local Spin Chern Marker — spinful (Kane-Mele)
+# Local Spin Chern Marker — spinful (Kane-Mele) via Prodan generalized method
 # ==============================================================================
-def calc_local_spin_chern(H_2N, x, y, E_Fermi=0.0):
+def calc_prodan_spin_chern(H_2N, x, y, E_Fermi=0.0):
     """
-    Returns the local Spin Chern Marker C_s = (C_up - C_down) / 2 per site.
-
-    The total Chern number C_up + C_down is exactly zero in a time-reversal
-    symmetric system. The spin Chern number C_s = (C_up - C_down) / 2
-    is the correct topological invariant for the Quantum Spin Hall phase.
+    Calculates the Local Spin Chern Marker using the Prodan generalized method.
+    Dynamically isolates the tilted helical states via the spin spectrum.
     """
+    N = len(x)
     x_2N = np.concatenate([x, x])
     y_2N = np.concatenate([y, y])
 
+    # =========================================================================
+    # STEP 1: Isolate the Valence Electrons
+    # =========================================================================
     evals, evecs = np.linalg.eigh(H_2N)
     occ = evecs[:, evals < E_Fermi]
-    P   = occ @ occ.conj().T
+    P = occ @ occ.conj().T
 
-    PxP = (P * x_2N[np.newaxis, :]) @ P
-    PyP = (P * y_2N[np.newaxis, :]) @ P
+    # =========================================================================
+    # STEP 2: The Spin Projection (P Sz P)
+    # =========================================================================
+    Sz_diag = np.concatenate([np.ones(N), -np.ones(N)])
+    P_Sz_P = P @ (Sz_diag[:, np.newaxis] * P)
 
-    C_2N = np.real(np.diag(-2j * np.pi * (PxP @ PyP - PyP @ PxP)))
+    # =========================================================================
+    # STEP 3 & 4: Diagonalize Spin Spectrum & Split by Helicity
+    # =========================================================================
+    spin_evals, spin_evecs = np.linalg.eigh(P_Sz_P)
 
-    N = len(x)
-    # C_up in the first N entries, C_down in the last N entries
-    return (C_2N[:N] - C_2N[N:]) / 2.0
+
+
+    pos_helicity_mask = spin_evals > 0.1
+    evecs_plus = spin_evecs[:, pos_helicity_mask]
+    
+    P_plus = evecs_plus @ evecs_plus.conj().T
+
+    # =========================================================================
+    # STEP 5: Calculate the Local Chern Marker on the Helical Lane
+    # =========================================================================
+    PxP = (P_plus * x_2N[np.newaxis, :]) @ P_plus
+    PyP = (P_plus * y_2N[np.newaxis, :]) @ P_plus
+
+    C_plus_2N = np.real(np.diag(-2j * np.pi * (PxP @ PyP - PyP @ PxP)))
+
+    # =========================================================================
+    # STEP 6: Trace back to N physical sites
+    # =========================================================================
+    C_local = C_plus_2N[:N] + C_plus_2N[N:]
+
+    return C_local
 
 # ==============================================================================
 # Per-row workers for parallelisation
@@ -221,7 +246,7 @@ def compute_row(i, M_val, W_vals, done_row, x, y, sub,
 def compute_row_km(i, M_val, W_vals, done_row, x, y, sub,
                    nn_mask, active_nnn, sign_matrix, dx_hat, dy_hat,
                    bulk_mask, tR_base=0.3, W_anderson_fixed=0.0, W_rashba_fixed=0.0,
-                   sweep_type="anderson"):
+                   sweep_type="anderson", rashba_ratio=0.0):
     """
     Kane-Mele row worker.
 
@@ -239,7 +264,10 @@ def compute_row_km(i, M_val, W_vals, done_row, x, y, sub,
 
         if sweep_type == "anderson":
             w_and = W_val
-            w_rash = W_rashba_fixed
+            if rashba_ratio > 0.0:
+                w_rash = W_val * rashba_ratio / np.sqrt(3.0)
+            else:
+                w_rash = W_rashba_fixed
         elif sweep_type == "rashba":
             w_and = W_anderson_fixed
             w_rash = W_val
@@ -249,7 +277,7 @@ def compute_row_km(i, M_val, W_vals, done_row, x, y, sub,
         H_KM    = build_H_KaneMele(
                       x, y, sub, nn_mask, active_nnn, sign_matrix, dx_hat, dy_hat,
                       M=M_val, tR_base=tR_base, W_anderson=w_and, W_rashba=w_rash)
-        C_spin  = calc_local_spin_chern(H_KM, x, y)
+        C_spin  = calc_prodan_spin_chern(H_KM, x, y)
         row[j]  = float(np.mean(C_spin[bulk_mask]))
     return i, row
 

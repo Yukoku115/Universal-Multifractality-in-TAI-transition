@@ -4,7 +4,7 @@ from .core import (
     build_H_from_geometry,
     build_H_KaneMele,
     calc_local_chern,
-    calc_local_spin_chern,
+    calc_prodan_spin_chern,
     compute_row,
     compute_row_km,
 )
@@ -20,7 +20,7 @@ __all__ = [
     "build_H_KaneMele",
     # Local Chern markers
     "calc_local_chern",
-    "calc_local_spin_chern",
+    "calc_prodan_spin_chern",
     # Row workers
     "compute_row",
     "compute_row_km",
