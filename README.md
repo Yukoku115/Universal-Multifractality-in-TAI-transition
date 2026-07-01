@@ -1,8 +1,8 @@
 # Multifractal Analysis of the Topological Anderson Insulator (TAI) Transition
 
-This repository contains tight-binding simulation pipelines to compute topological phase diagrams and perform multifractal scaling analysis on 2D honeycomb lattices, utilizing the **Haldane model** (spinless) and the **Kane-Mele model** (spinful). 
+This repository contains tight-binding simulation pipelines to compute topological phase diagrams and perform multifractal scaling analysis on 2D honeycomb lattices, utilizing the Haldane model and the Kane-Mele model. 
 
-The simulations use the real-space **Local Chern Marker (LCM)** and the **Local Spin Chern Marker (LSCM)** to map phase boundaries under Anderson (electrostatic) disorder and Rashba spin-orbit coupling (SOC) disorder. At the phase boundaries, a 2D box-counting algorithm characterizes the multifractal dimensions to identify the universality classes of the metal-insulator transition.
+The simulations use the real-space Local Chern Marker (LCM) and the Local Spin Chern Marker (LSCM) to map phase boundaries under Anderson (electrostatic) disorder and Rashba spin-orbit coupling (SOC) disorder. At the phase boundaries, a 2D box-counting algorithm characterizes the multifractal dimensions to identify the universality classes of the metal-insulator transition.
 
 ---
 
